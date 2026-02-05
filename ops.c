@@ -43,13 +43,56 @@ void op_not(uint16_t reg[], uint16_t instr) {
 }
 
 void op_br(uint16_t reg[], uint16_t instr) {
-    uint16_t n = (instr >> 11) & 0x1;
-    uint16_t z = (instr >> 10) & 0x1;
-    uint16_t p = (instr >> 9) & 0x1;
+    uint16_t cond_flag = (instr >> 9) & 0x7;
 
-    if (n && reg[R_COND] == FL_NEG ||
-        z && reg[R_COND] == FL_ZRO ||
-        p && reg[R_COND] == FL_POS) {
+    if (cond_flag & reg[R_COND]) {
         reg[R_PC] += sign_extend(instr & 0x1FF, 9);
     }
 }
+
+void op_jmp(uint16_t reg[], uint16_t instr) {
+    uint16_t baser = (instr >> 6) & 0x7;
+    reg[R_PC] = reg[baser];
+}
+
+void op_jsr(uint16_t reg[], uint16_t instr) {
+   reg[R_R7] = reg[R_PC];
+
+   if ((instr >> 11) & 0x1) {
+       reg[R_PC] += sign_extend((instr & 0x7FF), 11);
+   } else {
+       reg[R_PC] = reg[(instr >> 6) & 0x7];
+   }
+}
+
+void op_ld(uint16_t reg[], uint16_t instr) {
+    uint16_t dr = (instr >> 9) & 0x7;
+
+    reg[dr] = sign_extend((instr & 0x1FF), 9);
+
+    update_flags(reg, dr);
+}
+
+void op_ldi(uint16_t reg[], uint16_t instr) {
+    uint16_t dr = (instr >> 9) & 0x7;
+    
+    reg[dr] = reg[reg[R_PC + sign_extend(instr & 0x1FF, 9)]];
+
+    update_flags(reg, dr);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
