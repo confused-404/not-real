@@ -66,6 +66,7 @@ enum
 #define MEMORY_MAX (1 << 16)
 uint16_t memory[MEMORY_MAX];
 uint16_t reg[R_COUNT];
+static int running = 1;
 
 struct termios original_tio;
 
@@ -369,7 +370,7 @@ static op_fn op_table[16] = {
     [OP_STI]  = op_sti,
     [OP_STR]  = op_str,
     [OP_TRAP] = op_trap,
-}
+};
 
 int main(int argc, const char* argv[])
 {
@@ -395,7 +396,6 @@ int main(int argc, const char* argv[])
     enum { PC_START = 0x3000 };
     reg[R_PC] = PC_START;
 
-    static int running = 1;
     while (running)
     {
         uint16_t instr = mem_read(reg[R_PC]++);
