@@ -4,4 +4,7 @@ simple process vm
 
 initially following: https://www.jmeiners.com/lc3-vm/
 
-plan to expand past this tutorial once I know what's going on
+## expansions from tutorial
+- trace flag
+- dispatch table
+- support for multiple vms
