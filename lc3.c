@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <sys/select.h>
+#include <stdbool.h>
 
 enum
 {
@@ -396,21 +397,29 @@ int main(int argc, const char* argv[])
         exit(2);
     }
     
-    for (int j = 1; j < argc; ++j)
+    if (!read_image(&vm, argv[1]))
     {
-        if (!read_image(&vm, argv[j]))
-        {
-            printf("failed to load image: %s\n", argv[j]);
-            exit(1);
-        }
+        printf("failed to load image: %s\n", argv[1]);
+        exit(1);
     }
+
+    bool trace = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--trace") == 0) trace = true;
+    }
+
     signal(SIGINT, handle_interrupt);
     disable_input_buffering();
 
     while (vm.running)
     {
+        uint16_t pc_before = vm.reg[R_PC];
         uint16_t instr = mem_read(&vm, vm.reg[R_PC]++);
         uint16_t op = instr >> 12;
+
+        if (trace)
+            printf("PC: 0x%04X Instr: 0x%04X Op: 0x%X\n", 
+                    (unsigned) pc_before, (unsigned) instr, (unsigned) op);
 
         op_table[op](&vm, instr);
     }
