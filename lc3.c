@@ -8,6 +8,8 @@
 #include <sys/types.h>
 #include <sys/termios.h>
 #include <sys/mman.h>
+#include <string.h>
+#include <sys/select.h>
 
 enum
 {
@@ -64,9 +66,20 @@ enum
 };
 
 #define MEMORY_MAX (1 << 16)
-uint16_t memory[MEMORY_MAX];
-uint16_t reg[R_COUNT];
-static int running = 1;
+
+typedef struct {
+    uint16_t mem[MEMORY_MAX];
+    uint16_t reg[R_COUNT];
+    int running;
+} VM;
+
+void vm_init(VM *vm) {
+    memset(vm, 0, sizeof(*vm));
+
+    vm->reg[R_COND] = FL_ZRO;
+    vm->reg[R_PC] = 0x3000;
+    vm->running = 1;
+}
 
 struct termios original_tio;
 
@@ -111,29 +124,29 @@ uint16_t swap16(uint16_t x)
 {
     return (x << 8) | (x >> 8);
 }
-void update_flags(uint16_t r)
+void update_flags(VM* vm, uint16_t r)
 {
-    if (reg[r] == 0)
+    if (vm->reg[r] == 0)
     {
-        reg[R_COND] = FL_ZRO;
+        vm->reg[R_COND] = FL_ZRO;
     }
-    else if (reg[r] >> 15)
+    else if (vm->reg[r] >> 15)
     {
-        reg[R_COND] = FL_NEG;
+        vm->reg[R_COND] = FL_NEG;
     }
     else
     {
-        reg[R_COND] = FL_POS;
+        vm->reg[R_COND] = FL_POS;
     }
 }
-void read_image_file(FILE* file)
+void read_image_file(VM* vm, FILE* file)
 {
     uint16_t origin;
     fread(&origin, sizeof(origin), 1, file);
     origin = swap16(origin);
 
     uint16_t max_read = MEMORY_MAX - origin;
-    uint16_t* p = memory + origin;
+    uint16_t* p = vm->mem + origin;
     size_t read = fread(p, sizeof(uint16_t), max_read, file);
 
     while (read-- > 0)
@@ -142,41 +155,41 @@ void read_image_file(FILE* file)
         ++p;
     }
 }
-int read_image(const char* image_path)
+int read_image(VM* vm, const char* image_path)
 {
     FILE* file = fopen(image_path, "rb");
     if (!file) { return 0; };
-    read_image_file(file);
+    read_image_file(vm, file);
     fclose(file);
     return 1;
 }
-void mem_write(uint16_t address, uint16_t val)
+void mem_write(VM* vm, uint16_t address, uint16_t val)
 {
-    memory[address] = val;
+    vm->mem[address] = val;
 }
 
-uint16_t mem_read(uint16_t address)
+uint16_t mem_read(VM* vm, uint16_t address)
 {
     if (address == MR_KBSR)
     {
         if (check_key())
         {
-            memory[MR_KBSR] = (1 << 15);
-            memory[MR_KBDR] = getchar();
+            vm->mem[MR_KBSR] = (1 << 15);
+            vm->mem[MR_KBDR] = getchar();
         }
         else
         {
-            memory[MR_KBSR] = 0;
+            vm->mem[MR_KBSR] = 0;
         }
     }
-    return memory[address];
+    return vm->mem[address];
 }
 
-typedef void (*op_fn)(uint16_t instr);
+typedef void (*op_fn)(VM* vm, uint16_t instr);
 
-static void op_bad(uint16_t instr) { (void) instr; abort(); }
+static void op_bad(VM* vm, uint16_t instr) { (void) vm; (void) instr; abort(); }
 
-static void op_add(uint16_t instr)
+static void op_add(VM* vm, uint16_t instr)
 {
     uint16_t dr = (instr >> 9) & 0x7;
     uint16_t sr1 = (instr >> 6) & 0x7;
@@ -184,39 +197,39 @@ static void op_add(uint16_t instr)
 
     if (imm_flag) {
         uint16_t imm5 = sign_extend(instr & 0x1F, 5);
-        reg[dr] = reg[sr1] + imm5;
+        vm->reg[dr] = vm->reg[sr1] + imm5;
     } else {
         uint16_t sr2 = instr & 0x7;
-        reg[dr] = reg[sr1] + reg[sr2];
+        vm->reg[dr] = vm->reg[sr1] + vm->reg[sr2];
     }
-    update_flags(dr);
+    update_flags(vm, dr);
 }
 
-static void op_br(uint16_t instr)
+static void op_br(VM* vm, uint16_t instr)
 {
     uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
     uint16_t cond_flag = (instr >> 9) & 0x7;
-    if (cond_flag & reg[R_COND]) {
-        reg[R_PC] += pc_offset;
+    if (cond_flag & vm->reg[R_COND]) {
+        vm->reg[R_PC] += pc_offset;
     }
 }
 
-static void op_trap(uint16_t instr)
+static void op_trap(VM* vm, uint16_t instr)
 {
-    reg[R_R7] = reg[R_PC];
+    vm->reg[R_R7] = vm->reg[R_PC];
 
     switch (instr & 0xFF)
     {
         case TRAP_GETC:
-            reg[R_R0] = (uint16_t)getchar();
-            update_flags(R_R0);
+            vm->reg[R_R0] = (uint16_t)getchar();
+            update_flags(vm, R_R0);
             break;
         case TRAP_OUT:
-            putc((char)reg[R_R0], stdout);
+            putc((char)vm->reg[R_R0], stdout);
             fflush(stdout);
             break;
         case TRAP_PUTS: {
-            uint16_t* c = memory + reg[R_R0];
+            uint16_t* c = vm->mem + vm->reg[R_R0];
             while (*c) { putc((char)*c, stdout); ++c; }
             fflush(stdout);
         } break;
@@ -225,11 +238,11 @@ static void op_trap(uint16_t instr)
             char c = getchar();
             putc(c, stdout);
             fflush(stdout);
-            reg[R_R0] = (uint16_t)c;
-            update_flags(R_R0);
+            vm->reg[R_R0] = (uint16_t)c;
+            update_flags(vm, R_R0);
         } break;
         case TRAP_PUTSP: {
-            uint16_t* c = memory + reg[R_R0];
+            uint16_t* c = vm->mem + vm->reg[R_R0];
             while (*c) {
                 char char1 = (*c) & 0xFF;
                 putc(char1, stdout);
@@ -242,14 +255,14 @@ static void op_trap(uint16_t instr)
         case TRAP_HALT:
             puts("HALT");
             fflush(stdout);
-            running = 0;
+            vm->running = 0;
             break;
         default:
             abort();
     }
 }
 
-static void op_and(uint16_t instr)
+static void op_and(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t r1 = (instr >> 6) & 0x7;
@@ -258,100 +271,100 @@ static void op_and(uint16_t instr)
     if (imm_flag)
     {
         uint16_t imm5 = sign_extend(instr & 0x1F, 5);
-        reg[r0] = reg[r1] & imm5;
+        vm->reg[r0] = vm->reg[r1] & imm5;
     }
     else
     {
         uint16_t r2 = instr & 0x7;
-        reg[r0] = reg[r1] & reg[r2];
+        vm->reg[r0] = vm->reg[r1] & vm->reg[r2];
     }
-    update_flags(r0);
+    update_flags(vm, r0);
 }
 
-static void op_not(uint16_t instr)
+static void op_not(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t r1 = (instr >> 6) & 0x7;
 
-    reg[r0] = ~reg[r1];
-    update_flags(r0);
+    vm->reg[r0] = ~vm->reg[r1];
+    update_flags(vm, r0);
 }
 
-static void op_jmp(uint16_t instr)
+static void op_jmp(VM* vm, uint16_t instr)
 {
     uint16_t r1 = (instr >> 6) & 0x7;
-    reg[R_PC] = reg[r1];
+    vm->reg[R_PC] = vm->reg[r1];
 }
 
-static void op_jsr(uint16_t instr)
+static void op_jsr(VM* vm, uint16_t instr)
 {
     uint16_t long_flag = (instr >> 11) & 1;
-    reg[R_R7] = reg[R_PC];
+    vm->reg[R_R7] = vm->reg[R_PC];
     if (long_flag)
     {
         uint16_t long_pc_offset = sign_extend(instr & 0x7FF, 11);
-        reg[R_PC] += long_pc_offset;  /* JSR */
+        vm->reg[R_PC] += long_pc_offset;  /* JSR */
     }
     else
     {
         uint16_t r1 = (instr >> 6) & 0x7;
-        reg[R_PC] = reg[r1]; /* JSRR */
+        vm->reg[R_PC] = vm->reg[r1]; /* JSRR */
     }
 }
 
-static void op_ld(uint16_t instr)
+static void op_ld(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
-    reg[r0] = mem_read(reg[R_PC] + pc_offset);
-    update_flags(r0);
+    vm->reg[r0] = mem_read(vm, vm->reg[R_PC] + pc_offset);
+    update_flags(vm, r0);
 }
 
-static void op_ldi(uint16_t instr)
+static void op_ldi(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
-    reg[r0] = mem_read(mem_read(reg[R_PC] + pc_offset));
-    update_flags(r0);
+    vm->reg[r0] = mem_read(vm, mem_read(vm, vm->reg[R_PC] + pc_offset));
+    update_flags(vm, r0);
 }
 
-static void op_ldr(uint16_t instr)
+static void op_ldr(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t r1 = (instr >> 6) & 0x7;
     uint16_t offset = sign_extend(instr & 0x3F, 6);
-    reg[r0] = mem_read(reg[r1] + offset);
-    update_flags(r0);
+    vm->reg[r0] = mem_read(vm, vm->reg[r1] + offset);
+    update_flags(vm, r0);
 }
 
-static void op_lea(uint16_t instr)
+static void op_lea(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
-    reg[r0] = reg[R_PC] + pc_offset;
-    update_flags(r0);
+    vm->reg[r0] = vm->reg[R_PC] + pc_offset;
+    update_flags(vm, r0);
 }
 
-static void op_st(uint16_t instr)
+static void op_st(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
-    mem_write(reg[R_PC] + pc_offset, reg[r0]);
+    mem_write(vm, vm->reg[R_PC] + pc_offset, vm->reg[r0]);
 }
 
-static void op_sti(uint16_t instr)
+static void op_sti(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t pc_offset = sign_extend(instr & 0x1FF, 9);
-    mem_write(mem_read(reg[R_PC] + pc_offset), reg[r0]);
+    mem_write(vm, mem_read(vm, vm->reg[R_PC] + pc_offset), vm->reg[r0]);
 }
 
-static void op_str(uint16_t instr)
+static void op_str(VM* vm, uint16_t instr)
 {
     uint16_t r0 = (instr >> 9) & 0x7;
     uint16_t r1 = (instr >> 6) & 0x7;
     uint16_t offset = sign_extend(instr & 0x3F, 6);
-    mem_write(reg[r1] + offset, reg[r0]);
+    mem_write(vm, vm->reg[r1] + offset, vm->reg[r0]);
 }
 
 static op_fn op_table[16] = {
@@ -374,6 +387,9 @@ static op_fn op_table[16] = {
 
 int main(int argc, const char* argv[])
 {
+    VM vm;
+    vm_init(&vm);
+
     if (argc < 2)
     {
         printf("lc3 [image-file1] ...\n");
@@ -382,7 +398,7 @@ int main(int argc, const char* argv[])
     
     for (int j = 1; j < argc; ++j)
     {
-        if (!read_image(argv[j]))
+        if (!read_image(&vm, argv[j]))
         {
             printf("failed to load image: %s\n", argv[j]);
             exit(1);
@@ -391,17 +407,12 @@ int main(int argc, const char* argv[])
     signal(SIGINT, handle_interrupt);
     disable_input_buffering();
 
-    reg[R_COND] = FL_ZRO;
-
-    enum { PC_START = 0x3000 };
-    reg[R_PC] = PC_START;
-
-    while (running)
+    while (vm.running)
     {
-        uint16_t instr = mem_read(reg[R_PC]++);
+        uint16_t instr = mem_read(&vm, vm.reg[R_PC]++);
         uint16_t op = instr >> 12;
 
-        op_table[op](instr);
+        op_table[op](&vm, instr);
     }
     restore_input_buffering();
 }
