@@ -110,7 +110,6 @@ uint16_t check_key()
 }
 void handle_interrupt(int signal)
 {
-    restore_input_buffering();
     printf("\n");
     exit(-2);
 }
@@ -188,7 +187,11 @@ uint16_t mem_read(VM* vm, uint16_t address)
 
 typedef void (*op_fn)(VM* vm, uint16_t instr);
 
-static void op_bad(VM* vm, uint16_t instr) { (void) vm; (void) instr; abort(); }
+static void op_bad(VM* vm, uint16_t instr) {
+    fprintf(stderr, "Illegal/Unimplemented opcode at PC=0x%04X instr=0x%04x\n",
+            (unsigned) (vm->reg[R_PC] - 1), (unsigned) instr);
+    vm->running = 0;
+} 
 
 static void op_add(VM* vm, uint16_t instr)
 {
@@ -410,6 +413,7 @@ int main(int argc, const char* argv[])
 
     signal(SIGINT, handle_interrupt);
     disable_input_buffering();
+    atexit(restore_input_buffering);
 
     while (vm.running)
     {
@@ -423,5 +427,4 @@ int main(int argc, const char* argv[])
 
         op_table[op](&vm, instr);
     }
-    restore_input_buffering();
 }
